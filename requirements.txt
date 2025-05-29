@@ -1,0 +1,6 @@
+flask
+requests
+google-generativeai
+python-dotenv
+pytube
+youtube-transcript-api
