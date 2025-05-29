@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template_string, send_from_directory
 import requests
 import google.generativeai as genai
 import os
@@ -33,10 +33,18 @@ def extract_video_id(youtube_url):
     return None
 
 def get_transcript_from_youtube_api(video_id):
-    """Obtém a transcrição do vídeo em português usando a YouTube Transcript API"""
+    """Obtém a transcrição do vídeo usando a YouTube Transcript API"""
     try:
-        # Tentar obter transcrição em português
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['pt', 'pt-BR'])
+        # Tentar obter transcrição em português primeiro
+        try:
+            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['pt', 'pt-BR'])
+        except:
+            # Se não houver em português, tentar em inglês
+            try:
+                transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+            except:
+                # Se não houver em inglês, pegar qualquer idioma disponível
+                transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
         
         # Concatenar todas as partes da transcrição
         full_transcript = ""
@@ -46,51 +54,116 @@ def get_transcript_from_youtube_api(video_id):
         return full_transcript.strip()
         
     except Exception as e:
-        print(f"Erro ao obter transcrição em português: {e}")
+        print(f"Erro ao obter transcrição da YouTube Transcript API: {e}")
         return None
 
 def get_available_transcripts(video_id):
-    """Verifica se há transcrições em português disponíveis"""
+    """Obtém lista de idiomas disponíveis para transcrição"""
     try:
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        portuguese_transcripts = []
+        available_languages = []
         
         for transcript in transcript_list:
-            if transcript.language_code in ['pt', 'pt-BR']:
-                portuguese_transcripts.append({
-                    'language': transcript.language,
-                    'language_code': transcript.language_code,
-                    'is_generated': transcript.is_generated,
-                    'is_translatable': transcript.is_translatable
-                })
+            available_languages.append({
+                'language': transcript.language,
+                'language_code': transcript.language_code,
+                'is_generated': transcript.is_generated,
+                'is_translatable': transcript.is_translatable
+            })
         
-        return portuguese_transcripts
+        return available_languages
         
     except Exception as e:
-        print(f"Erro ao listar transcrições em português: {e}")
+        print(f"Erro ao listar transcrições disponíveis: {e}")
         return []
 
 def get_youtube_info_alternative(youtube_url):
-    """Método alternativo para obter informações do YouTube"""
+    """Método alternativo para obter informações do YouTube usando múltiplas abordagens"""
+    
+    # Tentar primeiro com PyTube
     try:
         from pytube import YouTube
+        print(f"Tentando PyTube para: {youtube_url}")
         
         yt = YouTube(youtube_url)
         
-        # Obter informações básicas
-        info = {
-            'title': yt.title,
-            'description': yt.description,
-            'length': yt.length,
-            'views': yt.views,
-            'author': yt.author
+        if yt.title and yt.author:  # Se conseguiu obter as informações básicas
+            info = {
+                'title': yt.title,
+                'description': yt.description or 'Descrição não disponível',
+                'length': yt.length or 0,
+                'views': yt.views or 0,
+                'author': yt.author
+            }
+            print(f"PyTube funcionou: {info['title']}")
+            return info
+            
+    except Exception as e:
+        print(f"PyTube falhou: {e}")
+    
+    # Método alternativo: extrair informações do HTML da página
+    try:
+        print("Tentando método alternativo (scraping)")
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
         
+        response = requests.get(youtube_url, headers=headers, timeout=10)
+        html_content = response.text
+        
+        # Extrair título
+        title_match = re.search(r'"title":"([^"]+)"', html_content)
+        title = title_match.group(1) if title_match else "Título não disponível"
+        
+        # Extrair autor/canal
+        author_match = re.search(r'"author":"([^"]+)"', html_content) or re.search(r'"channelName":"([^"]+)"', html_content)
+        author = author_match.group(1) if author_match else "Canal não disponível"
+        
+        # Extrair duração (em segundos)
+        duration_match = re.search(r'"lengthSeconds":"(\d+)"', html_content)
+        duration = int(duration_match.group(1)) if duration_match else 0
+        
+        # Extrair visualizações
+        views_match = re.search(r'"viewCount":"(\d+)"', html_content)
+        views = int(views_match.group(1)) if views_match else 0
+        
+        # Extrair descrição
+        desc_match = re.search(r'"shortDescription":"([^"]*)"', html_content)
+        description = desc_match.group(1) if desc_match else "Descrição não disponível"
+        
+        info = {
+            'title': title,
+            'description': description,
+            'length': duration,
+            'views': views,
+            'author': author
+        }
+        
+        print(f"Scraping funcionou: {info['title']}")
         return info
         
     except Exception as e:
-        print(f"Erro ao obter informações do YouTube: {e}")
-        return None
+        print(f"Método alternativo falhou: {e}")
+    
+    # Se tudo falhar, retornar informações básicas com base no ID do vídeo
+    try:
+        video_id = extract_video_id(youtube_url)
+        return {
+            'title': f'Vídeo do YouTube (ID: {video_id})',
+            'description': 'Não foi possível obter a descrição',
+            'length': 0,
+            'views': 0,
+            'author': 'Canal não identificado'
+        }
+    except:
+        return {
+            'title': 'Vídeo do YouTube',
+            'description': 'Não foi possível obter informações',
+            'length': 0,
+            'views': 0,
+            'author': 'Canal não identificado'
+        }
 
 def analyze_with_gemini(transcript, video_info=None):
     """Analisa a transcrição usando o Gemini AI"""
@@ -194,6 +267,7 @@ def analyze_youtube_video():
             'transcript_source': transcript_source,
             'available_transcripts': available_transcripts,
             'transcript_length': len(transcript),
+            'transcript': transcript,  # Adicionando a transcrição na resposta
             'analysis': analysis,
             'video_id': video_id
         })
@@ -245,9 +319,21 @@ def health_check():
             '/': 'GET - Informações da API',
             '/analyze-youtube': 'POST - Analisar vídeo do YouTube',
             '/transcript-only/<video_id>': 'GET - Obter apenas transcrição',
-            '/health': 'GET - Status da API'
+            '/health': 'GET - Status da API',
+            '/frontend': 'GET - Interface web'
         }
     })
+
+@app.route('/frontend')
+def frontend():
+    """Serve the frontend HTML page"""
+    with open('index.html', 'r', encoding='utf-8') as file:
+        return file.read()
+
+@app.route('/static/<path:filename>')
+def static_files(filename):
+    """Serve static files if needed"""
+    return send_from_directory('static', filename)
 
 @app.route('/', methods=['GET'])
 def home():
@@ -272,6 +358,10 @@ def home():
             '/health': {
                 'method': 'GET', 
                 'description': 'Verifica status da API'
+            },
+            '/frontend': {
+                'method': 'GET',
+                'description': 'Interface web para análise de vídeos'
             }
         },
         'example_usage': {
@@ -293,7 +383,8 @@ def not_found(error):
         'available_endpoints': [
             '/',
             '/analyze-youtube',
-            '/health'
+            '/health',
+            '/frontend'
         ]
     }), 404
 
@@ -305,7 +396,8 @@ def method_not_allowed(error):
         'endpoints': {
             '/': ['GET'],
             '/analyze-youtube': ['POST', 'GET'],
-            '/health': ['GET']
+            '/health': ['GET'],
+            '/frontend': ['GET']
         }
     }), 405
 
@@ -313,7 +405,8 @@ if __name__ == '__main__':
     print("🚀 Iniciando API de Análise de Vídeos do YouTube...")
     print("📍 Endpoints disponíveis:")
     print("   GET  / - Informações da API")
+    print("   GET  /frontend - Interface web")
     print("   POST /analyze-youtube - Analisar vídeo")
     print("   GET  /health - Status da API")
-    print("🌐 Acesse: http://localhost:5000")
+    print("🌐 Acesse a interface em: http://localhost:5000/frontend")
     app.run(debug=True, host='0.0.0.0', port=5000)
