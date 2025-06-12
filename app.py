@@ -6,6 +6,15 @@ from dotenv import load_dotenv
 import re
 from urllib.parse import urlparse, parse_qs
 from youtube_transcript_api import YouTubeTranscriptApi
+# Novos imports para wordcloud
+from wordcloud import WordCloud
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('Agg')  # Backend não-interativo
+import io
+import base64
+from collections import Counter
+import string
 
 # Carregar variáveis de ambiente
 load_dotenv()
@@ -182,7 +191,6 @@ def analyze_with_gemini(transcript, video_info=None):
         1. Um resumo conciso do que foi discutido
         2. Elaborar uma análise crítica dos pontos positivos das falas de Adriana
         3. . Elaborar uma análise crítica dos pontos positivos das falas de Lodovico
-        4. Me forneça as 50 palavras mais utilizadas e sua frequencia para eu gerar uma nuvem de palavras
 
         Responda em português de forma estruturada e detalhada.
         """
@@ -193,6 +201,87 @@ def analyze_with_gemini(transcript, video_info=None):
     except Exception as e:
         print(f"Erro ao analisar com Gemini: {e}")
         return f"Erro na análise: {str(e)}"
+
+def clean_text_for_wordcloud(text):
+    """Limpa e processa o texto para gerar a nuvem de palavras"""
+    if not text:
+        return ""
+    
+    # Converter para minúsculas
+    text = text.lower()
+    
+    # Remover pontuação
+    text = text.translate(str.maketrans('', '', string.punctuation))
+    
+    # Remover números
+    text = re.sub(r'\d+', '', text)
+    
+    # Remover palavras muito comuns em português (stop words)
+    stop_words = {
+        'música','o', 'a', 'os', 'as', 'um', 'uma', 'uns', 'umas', 'de', 'do', 'da', 'dos', 'das',
+        'para', 'por', 'com', 'em', 'no', 'na', 'nos', 'nas', 'e', 'ou', 'mas', 'que',
+        'se', 'não', 'eu', 'tu', 'ele', 'ela', 'nós', 'vós', 'eles', 'elas', 'meu',
+        'minha', 'meus', 'minhas', 'seu', 'sua', 'seus', 'suas', 'nosso', 'nossa',
+        'nossos', 'nossas', 'este', 'esta', 'estes', 'estas', 'esse', 'essa', 'esses',
+        'essas', 'aquele', 'aquela', 'aqueles', 'aquelas', 'como', 'quando', 'onde',
+        'porque', 'quanto', 'qual', 'quais', 'quem', 'muito', 'mais', 'menos', 'bem',
+        'já', 'ainda', 'só', 'também', 'até', 'então', 'sobre', 'depois', 'antes',
+        'aqui', 'ali', 'lá', 'sim', 'aí', 'né', 'tá', 'vai', 'é', 'ser', 'estar',
+        'ter', 'haver', 'fazer', 'ver', 'dar', 'dizer', 'ir', 'vir', 'saber', 'poder'
+    }
+    
+    # Dividir em palavras e filtrar
+    words = text.split()
+    filtered_words = [word for word in words if len(word) > 2 and word not in stop_words]
+    
+    return ' '.join(filtered_words)
+
+def generate_wordcloud(text):
+    """Gera uma nuvem de palavras e retorna como base64"""
+    try:
+        # Limpar o texto
+        clean_text = clean_text_for_wordcloud(text)
+        
+        if not clean_text:
+            return None, []
+        
+        # Contar frequência das palavras
+        words = clean_text.split()
+        word_freq = Counter(words)
+        
+        # Pegar as 50 palavras mais comuns
+        top_words = word_freq.most_common(50)
+        
+        # Criar a nuvem de palavras
+        wordcloud = WordCloud(
+            width=800, 
+            height=400,
+            background_color='white',
+            max_words=50,
+            colormap='viridis',
+            relative_scaling=0.5,
+            random_state=42
+        ).generate(clean_text)
+        
+        # Salvar como imagem em memória
+        plt.figure(figsize=(10, 5))
+        plt.imshow(wordcloud, interpolation='bilinear')
+        plt.axis('off')
+        
+        # Converter para base64
+        img_buffer = io.BytesIO()
+        plt.savefig(img_buffer, format='png', bbox_inches='tight', 
+                   dpi=150, facecolor='white', edgecolor='none')
+        img_buffer.seek(0)
+        
+        img_str = base64.b64encode(img_buffer.getvalue()).decode()
+        plt.close()  # Liberar memória
+        
+        return img_str, top_words
+        
+    except Exception as e:
+        print(f"Erro ao gerar nuvem de palavras: {e}")
+        return None, []
 
 @app.route('/analyze-youtube', methods=['POST', 'GET'])
 def analyze_youtube_video():
@@ -260,6 +349,9 @@ def analyze_youtube_video():
 
         # Analisar com Gemini
         analysis = analyze_with_gemini(transcript, video_info)
+        
+        # Gerar nuvem de palavras
+        wordcloud_img, word_frequencies = generate_wordcloud(transcript)
 
         return jsonify({
             'status': 'success',
@@ -269,7 +361,9 @@ def analyze_youtube_video():
             'transcript_length': len(transcript),
             'transcript': transcript,  # Adicionando a transcrição na resposta
             'analysis': analysis,
-            'video_id': video_id
+            'video_id': video_id,
+            'wordcloud': wordcloud_img,  # Imagem da nuvem de palavras em base64
+            'word_frequencies': word_frequencies  # Lista das palavras mais frequentes
         })
 
     except Exception as e:
@@ -319,6 +413,7 @@ def health_check():
             '/': 'GET - Informações da API',
             '/analyze-youtube': 'POST - Analisar vídeo do YouTube',
             '/transcript-only/<video_id>': 'GET - Obter apenas transcrição',
+            '/wordcloud/<video_id>': 'GET - Gerar nuvem de palavras',
             '/health': 'GET - Status da API',
             '/frontend': 'GET - Interface web'
         }
@@ -354,6 +449,11 @@ def home():
                 'method': 'GET',
                 'description': 'Obtém apenas a transcrição de um vídeo',
                 'example': '/transcript-only/dQw4w9WgXcQ'
+            },
+            '/wordcloud/<video_id>': {
+                'method': 'GET',
+                'description': 'Gera nuvem de palavras de um vídeo',
+                'example': '/wordcloud/dQw4w9WgXcQ'
             },
             '/health': {
                 'method': 'GET', 
@@ -400,6 +500,44 @@ def method_not_allowed(error):
             '/frontend': ['GET']
         }
     }), 405
+
+@app.route('/wordcloud/<video_id>', methods=['GET'])
+def generate_wordcloud_only(video_id):
+    """Endpoint para gerar apenas a nuvem de palavras de um vídeo"""
+    try:
+        # Obter transcrição
+        transcript = get_transcript_from_youtube_api(video_id)
+        
+        if not transcript:
+            return jsonify({
+                'error': 'Transcrição não disponível para este vídeo',
+                'status': 'error',
+                'video_id': video_id
+            }), 404
+        
+        # Gerar nuvem de palavras
+        wordcloud_img, word_frequencies = generate_wordcloud(transcript)
+        
+        if not wordcloud_img:
+            return jsonify({
+                'error': 'Não foi possível gerar a nuvem de palavras',
+                'status': 'error',
+                'video_id': video_id
+            }), 500
+        
+        return jsonify({
+            'status': 'success',
+            'video_id': video_id,
+            'wordcloud': wordcloud_img,
+            'word_frequencies': word_frequencies,
+            'total_words': len(word_frequencies)
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'error': f'Erro ao gerar nuvem de palavras: {str(e)}',
+            'status': 'error'
+        }), 500
 
 if __name__ == '__main__':
     print("🚀 Iniciando API de Análise de Vídeos do YouTube...")

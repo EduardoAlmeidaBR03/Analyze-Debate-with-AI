@@ -4,3 +4,6 @@ google-generativeai
 python-dotenv
 pytube
 youtube-transcript-api
+wordcloud
+matplotlib
+pillow
