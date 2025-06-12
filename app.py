@@ -10,7 +10,7 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from wordcloud import WordCloud
 import matplotlib.pyplot as plt
 import matplotlib
-matplotlib.use('Agg')  # Backend não-interativo
+matplotlib.use('Agg')  
 import io
 import base64
 from collections import Counter
@@ -236,7 +236,41 @@ def clean_text_for_wordcloud(text):
     
     return ' '.join(filtered_words)
 
-def generate_wordcloud(text):
+def extract_speaker_text(transcript, speaker_name):
+    """Extrai o texto falado por um participante específico"""
+    if not transcript or not speaker_name:
+        return ""
+    
+    # Padrões para identificar falas do participante
+    patterns = [
+        rf'{re.escape(speaker_name)}\s*:(.+?)(?={re.escape("Adriana")}|{re.escape("Lodovico")}|\Z)',
+        rf'{re.escape(speaker_name)}\s+(.+?)(?={re.escape("Adriana")}|{re.escape("Lodovico")}|\Z)',
+        rf'{re.escape(speaker_name)}(.+?)(?={re.escape("Adriana")}|{re.escape("Lodovico")}|\Z)'
+    ]
+    
+    speaker_text = ""
+    
+    # Tentar diferentes padrões para extrair as falas
+    for pattern in patterns:
+        matches = re.findall(pattern, transcript, re.IGNORECASE | re.DOTALL)
+        if matches:
+            speaker_text = " ".join(matches).strip()
+            break
+    
+    # Se não encontrar padrões específicos, tentar busca por contexto
+    if not speaker_text:
+        # Dividir o texto em parágrafos/seções
+        sections = re.split(r'\n+', transcript)
+        for section in sections:
+            if speaker_name.lower() in section.lower():
+                # Extrair texto após o nome do participante
+                speaker_match = re.search(rf'{re.escape(speaker_name)}\s*:?\s*(.+)', section, re.IGNORECASE)
+                if speaker_match:
+                    speaker_text += " " + speaker_match.group(1)
+    
+    return speaker_text.strip()
+
+def generate_wordcloud(text, colormap='viridis', title_suffix=""):
     """Gera uma nuvem de palavras e retorna como base64"""
     try:
         # Limpar o texto
@@ -258,7 +292,7 @@ def generate_wordcloud(text):
             height=400,
             background_color='white',
             max_words=50,
-            colormap='viridis',
+            colormap=colormap,
             relative_scaling=0.5,
             random_state=42
         ).generate(clean_text)
@@ -267,6 +301,10 @@ def generate_wordcloud(text):
         plt.figure(figsize=(10, 5))
         plt.imshow(wordcloud, interpolation='bilinear')
         plt.axis('off')
+        
+        # Adicionar título se fornecido
+        if title_suffix:
+            plt.title(f'Nuvem de Palavras - {title_suffix}', fontsize=16, pad=20)
         
         # Converter para base64
         img_buffer = io.BytesIO()
@@ -282,6 +320,47 @@ def generate_wordcloud(text):
     except Exception as e:
         print(f"Erro ao gerar nuvem de palavras: {e}")
         return None, []
+
+def generate_speaker_wordclouds(transcript):
+    """Gera nuvens de palavras separadas para Adriana e Lodovico"""
+    wordclouds = {}
+    
+    # Extrair texto de cada participante
+    adriana_text = extract_speaker_text(transcript, "Adriana")
+    lodovico_text = extract_speaker_text(transcript, "Lodovico")
+    
+    print(f"Texto extraído da Adriana: {len(adriana_text)} caracteres")
+    print(f"Texto extraído do Lodovico: {len(lodovico_text)} caracteres")
+    
+    # Gerar nuvem de palavras para Adriana
+    if adriana_text:
+        adriana_wordcloud, adriana_freq = generate_wordcloud(
+            adriana_text, 
+            colormap='Reds', 
+            title_suffix="Adriana"
+        )
+        if adriana_wordcloud:
+            wordclouds['adriana'] = {
+                'image': adriana_wordcloud,
+                'word_frequencies': adriana_freq,
+                'text_length': len(adriana_text)
+            }
+    
+    # Gerar nuvem de palavras para Lodovico
+    if lodovico_text:
+        lodovico_wordcloud, lodovico_freq = generate_wordcloud(
+            lodovico_text, 
+            colormap='Blues', 
+            title_suffix="Lodovico"
+        )
+        if lodovico_wordcloud:
+            wordclouds['lodovico'] = {
+                'image': lodovico_wordcloud,
+                'word_frequencies': lodovico_freq,
+                'text_length': len(lodovico_text)
+            }
+    
+    return wordclouds
 
 @app.route('/analyze-youtube', methods=['POST', 'GET'])
 def analyze_youtube_video():
@@ -350,8 +429,11 @@ def analyze_youtube_video():
         # Analisar com Gemini
         analysis = analyze_with_gemini(transcript, video_info)
         
-        # Gerar nuvem de palavras
-        wordcloud_img, word_frequencies = generate_wordcloud(transcript)
+        # Gerar nuvem de palavras geral
+        wordcloud_img, word_frequencies = generate_wordcloud(transcript, 'viridis', 'Geral')
+        
+        # Gerar nuvens de palavras por participante
+        speaker_wordclouds = generate_speaker_wordclouds(transcript)
 
         return jsonify({
             'status': 'success',
@@ -362,8 +444,9 @@ def analyze_youtube_video():
             'transcript': transcript,  # Adicionando a transcrição na resposta
             'analysis': analysis,
             'video_id': video_id,
-            'wordcloud': wordcloud_img,  # Imagem da nuvem de palavras em base64
-            'word_frequencies': word_frequencies  # Lista das palavras mais frequentes
+            'wordcloud': wordcloud_img,  # Imagem da nuvem de palavras geral em base64
+            'word_frequencies': word_frequencies,  # Lista das palavras mais frequentes gerais
+            'speaker_wordclouds': speaker_wordclouds  # Nuvens de palavras por participante
         })
 
     except Exception as e:
